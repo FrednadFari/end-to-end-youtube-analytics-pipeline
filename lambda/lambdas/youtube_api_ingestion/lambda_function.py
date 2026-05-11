@@ -16,7 +16,6 @@ logger.setLevel(logging.INFO)
 # ---- AWS clients ----
 # S3 client to save data to Bronze bucket
 s3_client = boto3.client('s3')
-# SNS client to send notifications on success or failure
 sns_client = boto3.client('sns')
 
 # ---- Environment variables ----

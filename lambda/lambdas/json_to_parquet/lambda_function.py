@@ -14,8 +14,8 @@ sns_client = boto3.client('sns')
 BUCKET_SILVER = os.environ['BUCKET_SILVER']
 # Glue catalog database name
 GLUE_DB_SILVER = os.environ['GLUE_DB_SILVER']
-# Glue catalog table name
-GLUE_TABLE_REFERENCE = os.environ['GLUE_TABLE_REFERENCE']
+# Glue catalog table name - optional for future use
+GLUE_TABLE_REFERENCE = os.environ.get('GLUE_TABLE_REFERENCE', '')
 # SNS topic for alerts
 SNS_ALERT_TOPIC_ARN = os.environ['SNS_ALERT_TOPIC_ARN']
 

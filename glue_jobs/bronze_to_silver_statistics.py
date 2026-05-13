@@ -1,5 +1,6 @@
 import sys
 import logging
+import boto3
 from awsglue.transforms import *
 from awsglue.utils import getResolvedOptions
 from pyspark.context import SparkContext
@@ -22,7 +23,7 @@ args = getResolvedOptions(sys.argv, [
     'JOB_NAME',
     'bronze_database',
     'bronze_table',
-    'bronze_path',        # ← add this
+    'bronze_path',
     'silver_bucket',
     'silver_database',
     'silver_table',
@@ -38,14 +39,19 @@ job.init(args['JOB_NAME'], args)
 
 def read_bronze_data():
     """
-    Read raw statistics data directly from S3
-    Using spark.read for better encoding handling
+    Read raw statistics CSV data directly from S3
+    Uses recursive glob pattern to find CSV files in region subfolders
     Handles KR, JP, RU files with special characters
     """
-    logger.info(f"Reading bronze data from: {args['bronze_path']}")
+    logger.info(f"Reading bronze CSV data from: {args['bronze_path']}")
 
     try:
-        # ---- Read CSV files with encoding options ----
+        # ---- Read CSV files recursively from all region subfolders ----
+        # Pattern region=*/*.csv finds all CSV files in all region folders
+        csv_path = f"{args['bronze_path']}region=*/*.csv"
+
+        logger.info(f"Looking for CSV files at: {csv_path}")
+
         df = spark.read \
             .option('header', 'true') \
             .option('inferSchema', 'true') \
@@ -53,9 +59,9 @@ def read_bronze_data():
             .option('escape', '"') \
             .option('encoding', 'UTF-8') \
             .option('mode', 'PERMISSIVE') \
-            .csv(args['bronze_path'])
+            .csv(csv_path)
 
-        logger.info(f"Bronze data loaded - rows: {df.count()}")
+        logger.info(f"Bronze CSV data loaded - rows: {df.count()}")
         df.printSchema()
         return df
 
@@ -104,8 +110,9 @@ def parse_and_standardize(df):
     )
     logger.info("Parsed: publish_time → TimestampType")
 
-    # ---- Parse category_id ----
-    # Should be integer not string
+    # ---- Parse category_id as INTEGER ----
+    # Must be integer not string
+    # This is the partition column so correct type is critical
     df = df.withColumn(
         'category_id',
         F.col('category_id').cast(IntegerType())
@@ -142,7 +149,7 @@ def parse_and_standardize(df):
              .when(F.lower(F.col('video_error_or_removed').cast(StringType())) == 'false', False)
              .otherwise(None).cast(BooleanType())
         )
-    logger.info("Parsed: comments_disabled, ratings_disabled, video_error_or_removed → BooleanType")
+    logger.info("Parsed: boolean fields → BooleanType")
 
     # ---- Keep string fields as clean strings ----
     df = df \
@@ -379,27 +386,86 @@ def apply_transformations(df):
 def write_to_silver(df):
     """
     Write clean data to silver bucket as Parquet
-    Partitioned by category_id for better query performance
+    Partitioned by category_id as INTEGER for correct type
+    Updates Glue catalog automatically after writing
+    Then fixes partition type from STRING to INTEGER in catalog
     """
     logger.info(f"Writing to silver path: {args['silver_path']}")
+
+    # ---- Make sure category_id is INTEGER before writing ----
+    # This ensures partition folders are created with correct type
+    df = df.withColumn(
+        'category_id',
+        F.col('category_id').cast(IntegerType())
+    )
+    logger.info("Confirmed: category_id cast to IntegerType before writing")
 
     # ---- Convert back to Glue DynamicFrame for writing ----
     dynamic_frame = DynamicFrame.fromDF(df, glueContext, 'silver_output')
 
-    # ---- Write as Parquet partitioned by category_id ----
-    glueContext.write_dynamic_frame.from_options(
-        frame=dynamic_frame,
+    # ---- Write as Parquet with catalog update ----
+    sink = glueContext.getSink(
         connection_type='s3',
-        connection_options={
-            'path': args['silver_path'],
-            'partitionKeys': ['category_id']
-        },
-        format='parquet',
-        transformation_ctx='write_silver'
+        path=args['silver_path'],
+        enableUpdateCatalog=True,
+        updateBehavior='UPDATE_IN_DATABASE',
+        partitionKeys=['category_id']
     )
 
+    # ---- Set catalog database and table ----
+    sink.setCatalogInfo(
+        catalogDatabase=args['silver_database'],
+        catalogTableName=args['silver_table']
+    )
+
+    # ---- Set format to Parquet ----
+    sink.setFormat('glueparquet')
+
+    # ---- Write the data ----
+    sink.writeFrame(dynamic_frame)
+
     logger.info(f"Successfully written to: {args['silver_path']}")
-    logger.info(f"Total records written: {df.count()}")
+    logger.info(f"Catalog updated: {args['silver_database']}.{args['silver_table']}")
+
+    # ---- Fix partition column type in catalog ----
+    # Glue always registers partition columns as STRING by default
+    # We manually update category_id partition type to INTEGER
+    glue_client = boto3.client('glue')
+
+    try:
+        # ---- Get current table definition from catalog ----
+        response = glue_client.get_table(
+            DatabaseName=args['silver_database'],
+            Name=args['silver_table']
+        )
+
+        table = response['Table']
+
+        # ---- Update partition keys type to INTEGER ----
+        partition_keys = table.get('PartitionKeys', [])
+        for key in partition_keys:
+            if key['Name'] == 'category_id':
+                key['Type'] = 'int'
+
+        # ---- Update table in catalog ----
+        glue_client.update_table(
+            DatabaseName=args['silver_database'],
+            TableInput={
+                'Name': table['Name'],
+                'StorageDescriptor': table['StorageDescriptor'],
+                'PartitionKeys': partition_keys,
+                'TableType': table.get('TableType', ''),
+                'Parameters': table.get('Parameters', {})
+            }
+        )
+
+        logger.info("Catalog fixed: category_id partition type → INTEGER")
+
+    except Exception as e:
+        # ---- Log but do not fail the job ----
+        # Data is already written correctly to S3
+        # Only catalog type label failed to update
+        logger.error(f"Could not fix partition type in catalog: {str(e)}")
 
 # ======================================
 # ---- Main ETL Pipeline ----

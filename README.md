@@ -1,3 +1,4 @@
+file:///C:/Users/Fred/Downloads/youtube_pipeline_portfolio_final.html
 # YouTube Trending Data Pipeline
 
 > End-to-end AWS data engineering pipeline that ingests, transforms, and analyses YouTube trending video data across 10 regions using a Bronze → Silver → Gold medallion architecture.

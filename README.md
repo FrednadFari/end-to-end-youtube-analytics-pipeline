@@ -1,3 +1,6 @@
+## Architecture
+
+![YouTube Trending Data Pipeline](./docs/architecture.svg)
 # YouTube Trending Data Pipeline
 
 > End-to-end AWS data engineering pipeline that ingests, transforms, and analyses YouTube trending video data across 10 regions using a Bronze → Silver → Gold medallion architecture.

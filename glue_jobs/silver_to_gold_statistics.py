@@ -32,6 +32,7 @@ def read_silver_statistics():
     """
     Read clean statistics data from Silver Glue catalog
     This is the main video data cleaned by bronze to silver ETL
+    Drops region column if exists to prevent join conflict
     """
     logger.info(f"Reading silver statistics from: {args['silver_database']}")
 
@@ -44,9 +45,14 @@ def read_silver_statistics():
 
         df = dynamic_frame.toDF()
         logger.info("Silver statistics loaded successfully")
-
-        # ---- Fix 7: Use logger instead of printSchema stdout ----
         logger.info(df._jdf.schema().treeString())
+
+        # ---- Drop region if exists to prevent join conflict ----
+        # region is a partition column not needed for analytics
+        if 'region' in df.columns:
+            df = df.drop('region')
+            logger.info("Dropped region column from statistics")
+
         return df
 
     except Exception as e:
@@ -57,11 +63,8 @@ def read_silver_reference():
     """
     Read clean reference data from Silver Glue catalog
     This is the category lookup data cleaned by Lambda
-
-    Fix 8: Table name matches EXACTLY what exists in silver catalog
-    raw_statistics_reference_data is the actual catalog table name
-    Even though it starts with raw_ it lives in the silver database
-    This is just a naming convention from when it was created
+    Table name matches EXACTLY what exists in silver catalog
+    Drops region column if exists to prevent join conflict
     """
     logger.info(f"Reading silver reference data from: {args['silver_database']}")
 
@@ -75,6 +78,13 @@ def read_silver_reference():
 
         df = dynamic_frame.toDF()
         logger.info("Silver reference data loaded successfully")
+
+        # ---- Drop region if exists to prevent join conflict ----
+        # region is a partition column not needed for category lookup
+        if 'region' in df.columns:
+            df = df.drop('region')
+            logger.info("Dropped region column from reference data")
+
         return df
 
     except Exception as e:
@@ -86,11 +96,12 @@ def join_with_categories(df_stats, df_ref):
     Join statistics with category names
     Enriches video data with human readable category names
     Instead of category_id=10 we get category_name=Music
+    region already dropped from both dataframes before this step
     """
     logger.info("Joining statistics with category reference data...")
 
     # ---- Prepare reference data for join ----
-    # Rename columns to avoid conflicts after join
+    # Select only needed columns to avoid any remaining conflicts
     df_ref_clean = df_ref \
         .select(
             F.col('id').cast(IntegerType()).alias('ref_category_id'),
@@ -118,9 +129,6 @@ def build_trending_analytics(df):
     - How many videos were trending per category per day?
     - What were the total views per category per day?
     - What was the average engagement per day?
-
-    Fix 4: Removed orderBy() - expensive shuffle with no benefit
-    Parquet does not preserve sort order across files
     """
     logger.info("Building trending_analytics table...")
 
@@ -153,7 +161,6 @@ def build_trending_analytics(df):
         # ---- Metadata ----
         F.current_timestamp().alias('processed_at')
     )
-    # ---- No orderBy() - removed for performance ----
 
     logger.info("trending_analytics built successfully")
     return trending
@@ -169,9 +176,8 @@ def build_channel_analytics(df):
     - What is the average engagement per channel?
     - Which channels are most liked?
 
-    Fix 2: Using window ranking instead of F.first()
-    to get the MOST FREQUENT category per channel
-    Fix 4: Removed orderBy() - expensive with no Parquet benefit
+    Using window ranking to get MOST FREQUENT category per channel
+    row_number() used instead of rank() to avoid ties
     """
     logger.info("Building channel_analytics table...")
 
@@ -186,7 +192,7 @@ def build_channel_analytics(df):
 
     # ---- Rank categories per channel by frequency ----
     # Window partitioned by channel ordered by count descending
-    # Rank 1 = most frequent category for that channel
+    # row_number() ensures exactly one result per channel no ties
     window = Window.partitionBy('channel_title').orderBy(
         F.col('category_count').desc()
     )
@@ -242,7 +248,6 @@ def build_channel_analytics(df):
         on='channel_title',
         how='left'
     )
-    # ---- No orderBy() - removed for performance ----
 
     logger.info("channel_analytics built successfully")
     return channel
@@ -257,8 +262,6 @@ def build_category_analytics(df):
     - How has category popularity changed over time?
     - Which categories get the highest engagement?
     - Which categories have the most trending videos?
-
-    Fix 4: Removed orderBy() - expensive with no Parquet benefit
     """
     logger.info("Building category_analytics table...")
 
@@ -295,7 +298,6 @@ def build_category_analytics(df):
         # ---- Metadata ----
         F.current_timestamp().alias('processed_at')
     )
-    # ---- No orderBy() - removed for performance ----
 
     logger.info("category_analytics built successfully")
     return category
@@ -400,14 +402,11 @@ try:
     logger.info("  3. category_analytics  - Category level trends")
     logger.info("=" * 50)
 
-    # ---- Fix 1: job.commit() only on success ----
-    # Moved OUT of finally block
+    # ---- job.commit() only on success ----
     # Only signals success when everything completes correctly
     # Prevents incorrect job bookmarking on failure
     job.commit()
 
 except Exception as e:
     logger.error(f"Glue ETL Job failed: {str(e)}")
-    # ---- job.commit() NOT called here ----
-    # Job will be marked as failed correctly
     raise e

@@ -23,4 +23,9 @@ JOB_NAME >> youtube-202-pipeline-bronze-to-silver-glue-spark-json-csv-dev
 
 --bronze_path  s3://youtube-bronze-may-202/youtube/raw_statistics/
 -------------------------------------------------------------------
+JOB_NAME >> youtube-202-pipeline-silver-to-gold-glue-spark-dev
 
+--silver_database   youtube-silver-glue-database-202
+--gold_bucket  youtube-gold-may-202
+--gold_database  youtube-gold-glue-database-202
+-------------------------------------------------------------------

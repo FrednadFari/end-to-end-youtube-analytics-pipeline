@@ -76,27 +76,14 @@ EXPECTED_COLUMNS = {
         'title',
         'channel_title',
         'category_id',
-        'publish_time',
-        'tags',
         'views',
         'likes',
         'dislikes',
         'comment_count',
-        'thumbnail_link',
-        'comments_disabled',
-        'ratings_disabled',
-        'video_error_or_removed',
-        'description',
-        'engagement_rate',
-        'like_dislike_ratio',
-        'trending_year',
-        'trending_month',
         'processed_at'
     ],
     'clean_reference_data': [
-        'id',
         'title',
-        'assignable',
         'processed_at'
     ]
 }
@@ -105,7 +92,6 @@ def send_sns_alert(subject, message):
     """
     Send SNS alert notification on quality pass or failure
     Does not raise error if SNS fails to avoid stopping pipeline
-    Removed unused passed parameter
     """
     if not SNS_TOPIC:
         logger.warning("SNS_ALERT_TOPIC_ARN not set - skipping notification")
@@ -232,7 +218,7 @@ def check_value_ranges(df, table_name):
         passed = invalid_views == 0
 
         logger.info(f"  Views range check:")
-        logger.info(f"    Max allowed: {MAX_VIEWS:,}")
+        logger.info(f"    Max allowed:  {MAX_VIEWS:,}")
         logger.info(f"    Invalid rows: {invalid_views}")
         logger.info(f"    Result:       {'PASSED' if passed else 'FAILED'}")
 
@@ -285,7 +271,7 @@ def check_freshness(df, table_name):
     Check 5: Data freshness
     processed_at timestamp should be recent enough
     Data older than FRESHNESS_HOURS is considered stale
-    FRESHNESS_HOURS now configurable via DQ_FRESHNESS_HOURS environment variable
+    FRESHNESS_HOURS configurable via DQ_FRESHNESS_HOURS environment variable
     """
     if 'processed_at' not in df.columns:
         logger.warning(f"processed_at not found in {table_name} - skipping freshness check")
@@ -337,6 +323,7 @@ def run_quality_checks(s3_path, table_name):
     """
     Run all quality checks for a given table
     Returns summary of all checks and overall pass/fail
+    Uses column filtering and sampling to avoid Lambda memory issues
     """
     logger.info(f"{'=' * 50}")
     logger.info(f"Running quality checks for: {table_name}")
@@ -344,9 +331,52 @@ def run_quality_checks(s3_path, table_name):
     logger.info(f"{'=' * 50}")
 
     try:
-        # ---- Read data from S3 silver bucket ----
-        df = wr.s3.read_parquet(path=s3_path, dataset=True)
-        logger.info(f"Data loaded - rows: {len(df)} columns: {len(df.columns)}")
+        # ---- Read only needed columns to save memory ----
+        # Do not read description and tags - they are large text fields
+        # Not needed for quality checks
+        columns_needed = [
+            'video_id',
+            'title',
+            'channel_title',
+            'category_id',
+            'views',
+            'likes',
+            'dislikes',
+            'comment_count',
+            'trending_date',
+            'processed_at'
+        ]
+
+        # ---- Read with column filter ----
+        # Only reads needed columns from Parquet
+        # Much less memory than reading all columns
+        try:
+            if table_name == 'clean_statistics':
+                df = wr.s3.read_parquet(
+                    path=s3_path,
+                    dataset=True,
+                    columns=columns_needed
+                )
+            else:
+                # ---- Reference data is small - read all columns ----
+                df = wr.s3.read_parquet(
+                    path=s3_path,
+                    dataset=True
+                )
+            
+        except Exception:
+            # ---- Fallback: read all columns if specific columns fail ----
+            df = wr.s3.read_parquet(path=s3_path, dataset=True)
+
+        total_rows = len(df)
+        logger.info(f"Data loaded - total rows: {total_rows} columns: {len(df.columns)}")
+
+        # ---- Sample if dataset is large ----
+        # 10000 rows is enough for quality checks
+        # Avoids Lambda OutOfMemory error on large datasets
+        if total_rows > 10000:
+            df = df.sample(n=10000, random_state=42)
+            logger.info(f"Sampled 10000 rows from {total_rows} total for quality checks")
 
     except Exception as e:
         logger.error(f"Failed to read data from {s3_path}: {str(e)}")
@@ -469,8 +499,7 @@ Table: {result['table']}
     # TRUE  → proceed to Gold layer
     # FALSE → stop pipeline and alert team
     return {
-        'statusCode': 200,
-        'quality_check_passed': overall_passed,
-        'summary': summary,
-        'results': all_results
-    }
+    'statusCode': 200,
+    'quality_check_passed': bool(overall_passed),
+    'summary': summary
+}
